@@ -5,8 +5,11 @@
   "dependencies": {
     "axios": "^1.8.4",
     "cra-template": "1.2.0",
+    "konva": "^9.3.22",
+    "lucide-react": "^0.525.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-konva": "^19.0.7",
     "react-router-dom": "^7.5.1",
     "react-scripts": "5.0.1"
   },
