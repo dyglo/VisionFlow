@@ -249,8 +249,6 @@ metadata:
 
 test_plan:
   current_focus:
-    - "YOLOv8 Object Detection API"
-    - "Image Upload and Processing"
     - "File Upload Interface"
     - "Image Analysis and Visualization"
   stuck_tasks: []
@@ -260,3 +258,5 @@ test_plan:
 agent_communication:
   - agent: "main"
     message: "Completed initial implementation of VisionFlow application with YOLOv8 integration. Core features implemented include: image upload with drag-and-drop, YOLOv8 object detection API, interactive visualization with React Konva, detection results display, export functionality, and modern UI. All high-priority backend and frontend tasks are ready for testing. Please test the image upload and detection workflow first."
+  - agent: "testing"
+    message: "BACKEND TESTING COMPLETE - All backend tasks are now working correctly. Fixed 2 critical issues: (1) Export functionality temporary file handling - ZIP files were being deleted before streaming, now reads content before temp directory cleanup. (2) Invalid file upload error handling - HTTPException was being caught and re-raised as 500, now properly returns 400 for invalid files. All 5 backend tasks tested and verified: YOLOv8 detection API, image upload/processing, MongoDB storage, export functionality (YOLO/COCO formats), and analysis history API. Backend is fully functional and ready for frontend integration testing."
