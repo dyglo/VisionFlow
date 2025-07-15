@@ -23,3 +23,7 @@ numpy>=1.26.0
 python-multipart>=0.0.9
 jq>=1.6.0
 typer>=0.9.0
+ultralytics>=8.0.0
+opencv-python>=4.8.0
+pillow>=10.0.0
+zipfile36>=0.1.3
