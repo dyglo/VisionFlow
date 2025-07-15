@@ -42,7 +42,7 @@ class VisionFlowTester:
         """Test basic API health check"""
         print("🔍 Testing API Health Check...")
         try:
-            response = requests.get(f"{self.backend_url}/", timeout=30)
+            response = requests.get(f"{self.backend_url}/", timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 if "VisionFlow API" in data.get("message", ""):
