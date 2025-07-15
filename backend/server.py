@@ -263,13 +263,12 @@ async def export_analysis(analysis_id: str, format: str = "yolo"):
                     if file_path != zip_path:
                         zipf.write(file_path, file_path.name)
             
-            # Return ZIP file
-            def generate():
-                with open(zip_path, 'rb') as f:
-                    yield from f
+            # Return ZIP file - read the file content before the temp directory is deleted
+            with open(zip_path, 'rb') as f:
+                zip_content = f.read()
             
             return StreamingResponse(
-                generate(),
+                io.BytesIO(zip_content),
                 media_type="application/zip",
                 headers={"Content-Disposition": f"attachment; filename=export_{analysis_id}.zip"}
             )
