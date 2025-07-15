@@ -1,8 +1,12 @@
 from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, desc
+from fastapi import Depends
+from database import get_db
+from models import File as FileModel, Detection, User, Export
 import os
 import logging
 from pathlib import Path
@@ -23,11 +27,6 @@ import shutil
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
-
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
 
 # Configure logging
 logging.basicConfig(
@@ -121,7 +120,7 @@ def draw_detections_on_image(image: np.ndarray, detections: List[DetectionResult
         color_bgr = color_rgb[::-1]  # Convert RGB to BGR
         
         # Draw rectangle
-        cv2.rectangle(result_image, (x1, y1), (x2, y2), color_bgr, 2)
+        cv2.rectangle(result_image, (x1, y1), (x2, y2), color_bgr, 8)
         
         # Draw label background
         label = f"{detection.class_name}: {detection.confidence:.2f}"
@@ -135,8 +134,116 @@ def draw_detections_on_image(image: np.ndarray, detections: List[DetectionResult
     
     return result_image
 
+@api_router.post("/upload")
+async def upload_file(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
+    """Upload image and store it without running YOLO analysis."""
+    try:
+        # Validate file type
+        if not file.content_type.startswith('image/'):
+            raise HTTPException(status_code=400, detail="Only image files are supported")
+        
+        # Read file contents
+        contents = await file.read()
+        if len(contents) == 0:
+            raise HTTPException(status_code=400, detail="Empty file uploaded")
+        
+        logger.info(f"Uploading file: {file.filename}, size: {len(contents)} bytes, type: {file.content_type}")
+        
+        # Encode image to base64 for storage
+        image_base64 = base64.b64encode(contents).decode('utf-8')
+        
+        # Create file record matching the database schema
+        file_record = FileModel(
+            filename=file.filename,
+            filetype=file.content_type,  # Match database field name
+            size=str(len(contents)),     # Match database field name and type
+            image_data=image_base64      # Store base64 encoded image
+        )
+        
+        # Save to database
+        db.add(file_record)
+        await db.commit()
+        await db.refresh(file_record)
+        
+        logger.info(f"File uploaded successfully with ID: {file_record.id}")
+        
+        return {
+            "status": "success",
+            "file_id": str(file_record.id),
+            "filename": file.filename,
+            "message": "File uploaded and stored"
+        }
+        
+    except HTTPException:
+        await db.rollback()
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Error uploading file: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@api_router.post("/analyze/{file_id}", response_model=AnalysisResult)
+async def analyze_file(file_id: str, db: AsyncSession = Depends(get_db)):
+    """Run YOLOv8 object detection on an already uploaded image."""
+    try:
+        # Convert string file_id to UUID
+        file_uuid = uuid.UUID(file_id)
+        stmt = select(FileModel).where(FileModel.id == file_uuid)
+        result = await db.execute(stmt)
+        file = result.scalar_one_or_none()
+        if not file:
+            raise HTTPException(status_code=404, detail="File not found")
+
+        # Decode back to image array
+        image_bytes = base64.b64decode(file.image_data)
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        start_time = datetime.now()
+        results = model(image)
+        processing_time = (datetime.now() - start_time).total_seconds()
+
+        detections = process_image_detections(results, image)
+        annotated = draw_detections_on_image(image, detections)
+        image_base64 = encode_image_to_base64(annotated)
+
+        # Update file record with annotated image
+        file.image_data = image_base64
+
+        # Remove previous detections
+        await db.execute(Detection.__table__.delete().where(Detection.file_id == file.id))
+
+        for det in detections:
+            det_row = Detection(
+                file_id=file.id,
+                class_name=det.class_name,
+                confidence=str(det.confidence),
+                box_coordinates=det.bbox
+            )
+            db.add(det_row)
+
+        await db.commit()
+
+        analysis = AnalysisResult(
+            id=file_id,
+            filename=file.filename,
+            file_type=file.filetype,
+            image_data=image_base64,
+            detections=detections,
+            total_objects=len(detections),
+            processing_time=processing_time,
+            timestamp=datetime.utcnow()
+        )
+
+        return analysis
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error analyzing file: {e}")
+        raise HTTPException(status_code=500, detail="Error analyzing file")
+
 @api_router.post("/detect", response_model=AnalysisResult)
-async def detect_objects(file: UploadFile = File(...)):
+async def detect_objects(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
     """Detect objects in uploaded image using YOLOv8"""
     try:
         # Validate file type
@@ -175,9 +282,31 @@ async def detect_objects(file: UploadFile = File(...)):
             processing_time=processing_time
         )
         
-        # Save to database
-        await db.analyses.insert_one(result.dict())
-        
+        # Persist to PostgreSQL
+        file_record = FileModel(
+            filename=file.filename,
+            file_type=file.content_type,
+            file_size=len(contents),
+            image_data=image_base64,
+            processing_time=processing_time
+        )
+        db.add(file_record)
+        await db.flush()
+
+        for det in detections:
+            det_row = Detection(
+                file_id=file_record.id,
+                class_name=det.class_name,
+                confidence=det.confidence,
+                x_min=det.bbox[0],
+                y_min=det.bbox[1],
+                x_max=det.bbox[2],
+                y_max=det.bbox[3]
+            )
+            db.add(det_row)
+
+        await db.commit()
+
         return result
         
     except HTTPException:
@@ -187,34 +316,152 @@ async def detect_objects(file: UploadFile = File(...)):
         logger.error(f"Error processing image: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
 
+@api_router.post("/export")
+async def export_file(payload: Dict[str, Any], db: AsyncSession = Depends(get_db)):
+    """Export annotated image or detections.
+    Expected JSON payload: {"file_id": str, "format": "jpg|json|yolo"}
+    """
+    file_id = payload.get("file_id")
+    export_format = payload.get("format", "jpg").lower()
+    if not file_id:
+        raise HTTPException(status_code=400, detail="file_id required")
+    try:
+        file_uuid = uuid.UUID(file_id)
+        stmt = select(FileModel).where(FileModel.id == file_uuid)
+        result = await db.execute(stmt)
+        file = result.scalar_one_or_none()
+        if not file:
+            raise HTTPException(status_code=404, detail="File not found")
+
+        det_stmt = select(Detection).where(Detection.file_id == file_uuid)
+        det_res = await db.execute(det_stmt)
+        detections = det_res.scalars().all()
+
+        # JPG/PNG returns annotated image stored in image_data
+        if export_format in ["jpg", "jpeg", "png"]:
+            if not file.image_data:
+                raise HTTPException(status_code=400, detail="Annotated image not available")
+            image_bytes = base64.b64decode(file.image_data)
+            headers = {"Content-Disposition": f"attachment; filename={file.filename}_annotated.jpg"}
+            return StreamingResponse(io.BytesIO(image_bytes), media_type="image/jpeg", headers=headers)
+
+        elif export_format == "json":
+            det_json = [
+                {
+                    "class_name": d.class_name,
+                    "confidence": d.confidence,
+                    "bbox": d.box_coordinates,
+                }
+                for d in detections
+            ]
+            return JSONResponse(content={"file_id": file_id, "filename": file.filename, "detections": det_json})
+
+        elif export_format == "yolo":
+            lines = []
+            for d in detections:
+                x1, y1, x2, y2 = d.box_coordinates
+                lines.append(f"{d.class_name} {x1} {y1} {x2} {y2} {d.confidence}")
+            yolo_bytes = "\n".join(lines).encode()
+            headers = {"Content-Disposition": f"attachment; filename={file.filename}.txt"}
+            return StreamingResponse(io.BytesIO(yolo_bytes), media_type="text/plain", headers=headers)
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported format")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Export error: {e}")
+        raise HTTPException(status_code=500, detail="Error exporting results")
+
 @api_router.get("/analyses", response_model=List[AnalysisResult])
-async def get_analyses():
+async def get_analyses(db: AsyncSession = Depends(get_db)):
     """Get all analysis results"""
     try:
-        analyses = await db.analyses.find().sort("timestamp", -1).to_list(100)
-        return [AnalysisResult(**analysis) for analysis in analyses]
+        # Get files with their detections, ordered by created_at desc
+        stmt = select(FileModel).order_by(desc(FileModel.created_at)).limit(100)
+        result = await db.execute(stmt)
+        files = result.scalars().all()
+        
+        analyses = []
+        for file in files:
+            # Convert file and detections to AnalysisResult format
+            detections = [
+                DetectionResult(
+                    id=str(det.id),
+                    class_name=det.class_name,
+                    confidence=det.confidence,
+                    bbox=[det.x_min, det.y_min, det.x_max, det.y_max],
+                    color=get_color_for_class(hash(det.class_name) % len(COLORS))
+                ) for det in file.detections
+            ]
+            
+            analysis = AnalysisResult(
+                id=str(file.id),
+                filename=file.filename,
+                file_type=file.file_type,
+                image_data=file.image_data,
+                detections=detections,
+                total_objects=len(detections),
+                processing_time=file.processing_time or 0.0,
+                timestamp=file.created_at
+            )
+            analyses.append(analysis)
+            
+        return analyses
     except Exception as e:
         logger.error(f"Error fetching analyses: {str(e)}")
         raise HTTPException(status_code=500, detail="Error fetching analyses")
 
 @api_router.get("/analyses/{analysis_id}", response_model=AnalysisResult)
-async def get_analysis(analysis_id: str):
+async def get_analysis(analysis_id: str, db: AsyncSession = Depends(get_db)):
     """Get specific analysis result"""
     try:
-        analysis = await db.analyses.find_one({"id": analysis_id})
-        if not analysis:
+        # Get file by ID with its detections
+        stmt = select(FileModel).where(FileModel.id == analysis_id)
+        result = await db.execute(stmt)
+        file = result.scalar_one_or_none()
+        
+        if not file:
             raise HTTPException(status_code=404, detail="Analysis not found")
-        return AnalysisResult(**analysis)
+        
+        # Convert file and detections to AnalysisResult format
+        detections = [
+            DetectionResult(
+                id=str(det.id),
+                class_name=det.class_name,
+                confidence=det.confidence,
+                bbox=[det.x_min, det.y_min, det.x_max, det.y_max],
+                color=get_color_for_class(hash(det.class_name) % len(COLORS))
+            ) for det in file.detections
+        ]
+        
+        analysis = AnalysisResult(
+            id=str(file.id),
+            filename=file.filename,
+            file_type=file.file_type,
+            image_data=file.image_data,
+            detections=detections,
+            total_objects=len(detections),
+            processing_time=file.processing_time or 0.0,
+            timestamp=file.created_at
+        )
+        
+        return analysis
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error fetching analysis: {str(e)}")
         raise HTTPException(status_code=500, detail="Error fetching analysis")
 
 @api_router.post("/export/{analysis_id}")
-async def export_analysis(analysis_id: str, format: str = "yolo"):
+async def export_analysis(analysis_id: str, format: str = "yolo", db: AsyncSession = Depends(get_db)):
     """Export analysis results in specified format"""
     try:
-        analysis = await db.analyses.find_one({"id": analysis_id})
-        if not analysis:
+        # Get file by ID with its detections
+        stmt = select(FileModel).where(FileModel.id == analysis_id)
+        result = await db.execute(stmt)
+        file = result.scalar_one_or_none()
+        
+        if not file:
             raise HTTPException(status_code=404, detail="Analysis not found")
         
         # Create temporary directory
@@ -222,35 +469,35 @@ async def export_analysis(analysis_id: str, format: str = "yolo"):
             temp_path = Path(temp_dir)
             
             # Save original image
-            image_data = base64.b64decode(analysis["image_data"])
-            image_path = temp_path / f"{analysis['filename']}"
+            image_data = base64.b64decode(file.image_data)
+            image_path = temp_path / f"{file.filename}"
             with open(image_path, 'wb') as f:
                 f.write(image_data)
             
             # Generate annotations based on format
             if format == "yolo":
-                annotations_path = temp_path / f"{Path(analysis['filename']).stem}.txt"
+                annotations_path = temp_path / f"{Path(file.filename).stem}.txt"
                 with open(annotations_path, 'w') as f:
-                    for det in analysis["detections"]:
+                    for det in file.detections:
                         # Convert to YOLO format (normalized coordinates)
                         # Note: This is a simplified conversion - in real implementation,
                         # you'd need image dimensions for proper normalization
-                        f.write(f"0 {det['bbox'][0]} {det['bbox'][1]} {det['bbox'][2]} {det['bbox'][3]}\n")
+                        f.write(f"0 {det.x_min} {det.y_min} {det.x_max} {det.y_max}\n")
             
             elif format == "coco":
                 coco_data = {
-                    "images": [{"id": 1, "file_name": analysis['filename']}],
+                    "images": [{"id": 1, "file_name": file.filename}],
                     "annotations": [],
                     "categories": []
                 }
                 
-                for i, det in enumerate(analysis["detections"]):
+                for i, det in enumerate(file.detections):
                     annotation = {
                         "id": i,
                         "image_id": 1,
                         "category_id": 1,
-                        "bbox": det['bbox'],
-                        "area": (det['bbox'][2] - det['bbox'][0]) * (det['bbox'][3] - det['bbox'][1]),
+                        "bbox": [det.x_min, det.y_min, det.x_max, det.y_max],
+                        "area": (det.x_max - det.x_min) * (det.y_max - det.y_min),
                         "iscrowd": 0
                     }
                     coco_data["annotations"].append(annotation)
@@ -286,16 +533,26 @@ async def root():
     return {"message": "VisionFlow API - YOLOv8 Object Detection Service"}
 
 @api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.dict()
-    status_obj = StatusCheck(**status_dict)
-    _ = await db.status_checks.insert_one(status_obj.dict())
-    return status_obj
+async def create_status_check(input: StatusCheckCreate, db: AsyncSession = Depends(get_db)):
+    """Create a status check entry"""
+    try:
+        # For now, just return the status check without storing it
+        # You can implement User model storage if needed
+        status_obj = StatusCheck(**input.dict())
+        return status_obj
+    except Exception as e:
+        logger.error(f"Error creating status check: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error creating status check")
 
 @api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    status_checks = await db.status_checks.find().to_list(1000)
-    return [StatusCheck(**status_check) for status_check in status_checks]
+async def get_status_checks(db: AsyncSession = Depends(get_db)):
+    """Get status checks - simplified implementation"""
+    try:
+        # Return empty list for now - implement User-based storage if needed
+        return []
+    except Exception as e:
+        logger.error(f"Error fetching status checks: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error fetching status checks")
 
 # Include the router in the main app
 app.include_router(api_router)
@@ -308,6 +565,4 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
+# Database connections are handled by SQLAlchemy engine
