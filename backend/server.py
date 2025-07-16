@@ -647,6 +647,57 @@ async def options_handler(path: str):
         }
     )
 
+# In-memory caches for analysis status and results (for demo/free tier only)
+analysis_status: Dict[str, str] = {}
+analysis_results: Dict[str, Any] = {}
+
+# ---------------- Background Analysis Helpers -----------------
+async def _run_analysis(file_id: str):
+    """Background task that runs YOLO detection and stores result in cache and DB."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    # Create a new session because the background task has no request context
+    engine = create_async_engine(os.getenv("DATABASE_URL"))
+    async_session = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with async_session() as db:
+        try:
+            logger.info(f"[BG] Running analysis for {file_id}")
+            # Re-use existing analyze logic via internal function
+            result = await analyze_file_internal(file_id, db)  # you'll implement or import
+            analysis_results[file_id] = result
+            analysis_status[file_id] = "done"
+            logger.info(f"[BG] Analysis complete for {file_id}")
+        except Exception as e:
+            analysis_status[file_id] = "error"
+            analysis_results[file_id] = {"detail": str(e)}
+            logger.error(f"[BG] Analysis failed for {file_id}: {e}")
+
+# ---------------- API Endpoints -----------------
+
+@api_router.post("/analyze/{file_id}")
+async def start_analysis(file_id: str, background_tasks: BackgroundTasks):
+    """Kick off background analysis and return immediately"""
+    # If already processing or done, short-circuit
+    status = analysis_status.get(file_id)
+    if status in {"processing", "done"}:
+        return {"status": status, "file_id": file_id}
+
+    analysis_status[file_id] = "processing"
+    background_tasks.add_task(_run_analysis, file_id)
+    return {"status": "processing", "file_id": file_id}
+
+@api_router.get("/analysis/{file_id}")
+async def get_analysis_status(file_id: str):
+    status = analysis_status.get(file_id, "not_found")
+    if status == "done":
+        return {"status": "done", "result": analysis_results.get(file_id)}
+    elif status == "error":
+        return {"status": "error", "detail": analysis_results.get(file_id, {}).get("detail", "Unknown error")}
+    elif status == "processing":
+        return {"status": "processing"}
+    else:
+        return {"status": "not_found"}
+
 # Include the router in the main app
 app.include_router(api_router)
 

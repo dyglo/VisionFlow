@@ -82,19 +82,41 @@ const apiService = {
     }
   },
 
-  // Trigger analysis on an uploaded file
+  // Helper to pause execution
+  _sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+
+  // Trigger analysis in background and poll until completion
   analyzeFile: async (fileId) => {
+    // Step 1: kick off background task (returns {status:"processing"})
     try {
-      // Increase timeout for potentially long-running analysis (YOLO inference)
-      const response = await api.post(
-        apiService._path(`/analyze/${fileId}`),
-        null,
-        { timeout: 120000 } // 2-minute timeout
-      );
-      return response.data; // AnalysisResult
-    } catch (error) {
-      throw new Error(error.response?.data?.detail || error.message || 'Analysis failed');
+      await api.post(apiService._path(`/analyze/${fileId}`));
+    } catch (err) {
+      throw new Error(err.response?.data?.detail || err.message || 'Failed to start analysis');
     }
+
+    // Step 2: poll /analysis/{id} every 3s up to 5 min
+    const maxAttempts = 100; // 100 * 3s = 300s = 5 min
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        const res = await api.get(apiService._path(`/analysis/${fileId}`), { timeout: 10000 });
+        const data = res.data;
+        if (data.status === 'done') {
+          return data.result;
+        }
+        if (data.status === 'error') {
+          throw new Error(data.detail || 'Analysis error');
+        }
+        // else status === 'processing' -> wait and retry
+      } catch (pollErr) {
+        // If polling fails, continue (network hiccup) unless last attempt
+        if (attempt === maxAttempts - 1) {
+          throw new Error(pollErr.response?.data?.detail || pollErr.message || 'Analysis polling failed');
+        }
+      }
+      // wait before next poll
+      await apiService._sleep(3000);
+    }
+    throw new Error('Analysis timed out');
   },
 
   // Upload and detect objects in file
