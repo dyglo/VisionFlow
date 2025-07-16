@@ -1,6 +1,6 @@
 from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse, JSONResponse
-from fastapi.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
