@@ -1,5 +1,6 @@
-from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException
+from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.middleware.base import BaseHTTPMiddleware
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,6 +38,59 @@ logger = logging.getLogger(__name__)
 
 # Initialize YOLO model
 model = YOLO("yolov8n.pt")
+
+# Custom CORS middleware for additional debugging and fallback
+class CustomCORSMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Log request details for debugging
+        logger.info(f"Request: {request.method} {request.url} - Origin: {request.headers.get('origin')}")
+        
+        # Handle preflight OPTIONS requests
+        if request.method == "OPTIONS":
+            response = Response()
+            origin = request.headers.get("origin")
+            
+            # Allow specific origins
+            allowed_origins = [
+                "http://localhost:3000",
+                "https://vision-flow-alpha.vercel.app"
+            ]
+            
+            if origin and (origin in allowed_origins or origin.endswith(".vercel.app")):
+                response.headers["Access-Control-Allow-Origin"] = origin
+            else:
+                response.headers["Access-Control-Allow-Origin"] = "*"
+                
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "*"
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Access-Control-Max-Age"] = "3600"
+            
+            logger.info(f"CORS preflight response headers: {dict(response.headers)}")
+            return response
+        
+        # Process the request
+        response = await call_next(request)
+        
+        # Add CORS headers to all responses as fallback
+        origin = request.headers.get("origin")
+        if origin:
+            allowed_origins = [
+                "http://localhost:3000",
+                "https://vision-flow-alpha.vercel.app"
+            ]
+            
+            if origin in allowed_origins or origin.endswith(".vercel.app"):
+                response.headers["Access-Control-Allow-Origin"] = origin
+                response.headers["Access-Control-Allow-Credentials"] = "true"
+            else:
+                response.headers["Access-Control-Allow-Origin"] = "*"
+        
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        
+        logger.info(f"Response headers: {dict(response.headers)}")
+        return response
 
 # Create the main app without a prefix
 app = FastAPI()
@@ -527,7 +581,12 @@ async def export_analysis(analysis_id: str, format: str = "yolo", db: AsyncSessi
         logger.error(f"Error exporting analysis: {str(e)}")
         raise HTTPException(status_code=500, detail="Error exporting analysis")
 
-# Original routes
+# Add root endpoint for health checks and CORS verification
+@app.get("/")
+async def app_root():
+    return {"message": "VisionFlow API - YOLOv8 Object Detection Service", "status": "healthy"}
+
+# Original API routes
 @api_router.get("/")
 async def root():
     return {"message": "VisionFlow API - YOLOv8 Object Detection Service"}
@@ -549,12 +608,43 @@ async def get_status_checks(db: AsyncSession = Depends(get_db)):
     """Get status checks - simplified implementation"""
     try:
         # Return empty list for now - implement User-based storage if needed
-        return []
     except Exception as e:
         logger.error(f"Error fetching status checks: {str(e)}")
         raise HTTPException(status_code=500, detail="Error fetching status checks")
 
-# Configure CORS before including routes\n# Allow specific origins and all subdomains for Vercel deployments\napp.add_middleware(\n    CORSMiddleware,\n    allow_origins=[\n        "http://localhost:3000",\n        "https://vision-flow-alpha.vercel.app",\n    ],\n    # Allow any other *.vercel.app deployment previews\n    allow_origin_regex=r"https://.*\\.vercel\\.app",\n    allow_credentials=True,\n    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],\n    allow_headers=["*"],\n)
+# Add custom CORS middleware first for debugging and fallback
+app.add_middleware(CustomCORSMiddleware)
+
+# Configure standard CORS middleware as backup
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "https://vision-flow-alpha.vercel.app",
+    ],
+    # Allow any *.vercel.app deployment previews
+    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=3600,
+)
+
+# Add explicit OPTIONS handler for CORS preflight requests
+@app.options("/{path:path}")
+async def options_handler(path: str):
+    """Handle CORS preflight requests"""
+    return JSONResponse(
+        content={"message": "CORS preflight OK"},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Max-Age": "3600",
+        }
+    )
 
 # Include the router in the main app
 app.include_router(api_router)
