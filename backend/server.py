@@ -236,65 +236,7 @@ async def upload_file(file: UploadFile = File(...), db: AsyncSession = Depends(g
         logger.error(f"Error uploading file: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-@api_router.post("/analyze/{file_id}", response_model=AnalysisResult)
-async def analyze_file(file_id: str, db: AsyncSession = Depends(get_db)):
-    """Run YOLOv8 object detection on an already uploaded image."""
-    try:
-        # Convert string file_id to UUID
-        file_uuid = uuid.UUID(file_id)
-        stmt = select(FileModel).where(FileModel.id == file_uuid)
-        result = await db.execute(stmt)
-        file = result.scalar_one_or_none()
-        if not file:
-            raise HTTPException(status_code=404, detail="File not found")
-
-        # Decode back to image array
-        image_bytes = base64.b64decode(file.image_data)
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-        start_time = datetime.now()
-        results = model(image)
-        processing_time = (datetime.now() - start_time).total_seconds()
-
-        detections = process_image_detections(results, image)
-        annotated = draw_detections_on_image(image, detections)
-        image_base64 = encode_image_to_base64(annotated)
-
-        # Update file record with annotated image
-        file.image_data = image_base64
-
-        # Remove previous detections
-        await db.execute(Detection.__table__.delete().where(Detection.file_id == file.id))
-
-        for det in detections:
-            det_row = Detection(
-                file_id=file.id,
-                class_name=det.class_name,
-                confidence=str(det.confidence),
-                box_coordinates=det.bbox
-            )
-            db.add(det_row)
-
-        await db.commit()
-
-        analysis = AnalysisResult(
-            id=file_id,
-            filename=file.filename,
-            file_type=file.filetype,
-            image_data=image_base64,
-            detections=detections,
-            total_objects=len(detections),
-            processing_time=processing_time,
-            timestamp=datetime.utcnow()
-        )
-
-        return analysis
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error analyzing file: {e}")
-        raise HTTPException(status_code=500, detail="Error analyzing file")
+# Old synchronous analyze endpoint removed - now using background processing
 
 @api_router.post("/detect", response_model=AnalysisResult)
 async def detect_objects(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
