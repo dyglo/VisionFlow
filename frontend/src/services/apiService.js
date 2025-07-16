@@ -85,7 +85,12 @@ const apiService = {
   // Trigger analysis on an uploaded file
   analyzeFile: async (fileId) => {
     try {
-      const response = await api.post(apiService._path(`/analyze/${fileId}`));
+      // Increase timeout for potentially long-running analysis (YOLO inference)
+      const response = await api.post(
+        apiService._path(`/analyze/${fileId}`),
+        null,
+        { timeout: 120000 } // 2-minute timeout
+      );
       return response.data; // AnalysisResult
     } catch (error) {
       throw new Error(error.response?.data?.detail || error.message || 'Analysis failed');
