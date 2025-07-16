@@ -652,6 +652,72 @@ analysis_status: Dict[str, str] = {}
 analysis_results: Dict[str, Any] = {}
 
 # ---------------- Background Analysis Helpers -----------------
+async def analyze_file_internal(file_id: str, db: AsyncSession):
+    """Internal function to run YOLO analysis - used by both sync and async endpoints"""
+    import time
+    start_time = time.time()
+    
+    # Convert string file_id to UUID
+    file_uuid = uuid.UUID(file_id)
+    
+    # Get the file from database
+    stmt = select(FileModel).where(FileModel.id == file_uuid)
+    result = await db.execute(stmt)
+    file = result.scalar_one_or_none()
+    
+    if not file:
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    # Delete existing detections for this file
+    delete_stmt = delete(Detection).where(Detection.file_id == file.id)
+    await db.execute(delete_stmt)
+    
+    # Decode base64 image
+    image_data = base64.b64decode(file.image_data)
+    image_array = np.frombuffer(image_data, np.uint8)
+    image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+    
+    if image is None:
+        raise HTTPException(status_code=400, detail="Invalid image data")
+    
+    # Run YOLO detection
+    results = model(image)
+    detections = process_image_detections(results, image)
+    
+    # Draw bounding boxes on image
+    annotated_image = draw_detections_on_image(image.copy(), detections)
+    annotated_base64 = encode_image_to_base64(annotated_image)
+    
+    # Store detections in database
+    for det in detections:
+        detection = Detection(
+            file_id=file.id,
+            class_name=det.class_name,
+            confidence=str(det.confidence),
+            box_coordinates=det.bbox
+        )
+        db.add(detection)
+    
+    # Update file with annotated image
+    file.image_data = annotated_base64
+    
+    await db.commit()
+    await db.refresh(file)
+    
+    processing_time = time.time() - start_time
+    
+    # Return AnalysisResult
+    return AnalysisResult(
+        id=str(file.id),
+        filename=file.filename,
+        file_type=file.filetype,
+        image_data=annotated_base64,
+        detections=detections,
+        total_objects=len(detections),
+        processing_time=processing_time,
+        timestamp=file.created_at
+    )
+
 async def _run_analysis(file_id: str):
     """Background task that runs YOLO detection and stores result in cache and DB."""
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -663,8 +729,8 @@ async def _run_analysis(file_id: str):
         try:
             logger.info(f"[BG] Running analysis for {file_id}")
             # Re-use existing analyze logic via internal function
-            result = await analyze_file_internal(file_id, db)  # you'll implement or import
-            analysis_results[file_id] = result
+            result = await analyze_file_internal(file_id, db)
+            analysis_results[file_id] = result.dict()  # Convert to dict for JSON serialization
             analysis_status[file_id] = "done"
             logger.info(f"[BG] Analysis complete for {file_id}")
         except Exception as e:
