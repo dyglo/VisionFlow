@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_BASE_URL = process.env.REACT_APP_BACKEND_URL || 'http://127.0.0.1:8000';
+// Determine backend URL based on environment\n// 1. Use explicit env variable when provided.\n// 2. In production (e.g., on Vercel) fall back to the Render backend URL.\n// 3. Default to localhost during local development.\nlet backendURL = process.env.REACT_APP_BACKEND_URL;\n\nif (!backendURL) {\n  // If not set, choose sensible default based on host\n  if (typeof window !== 'undefined' && window.location.hostname.endsWith('vercel.app')) {\n    backendURL = 'https://visionflow-2blz.onrender.com';\n  } else {\n    backendURL = 'http://127.0.0.1:8000';\n  }\n}\n\nconst API_BASE_URL = backendURL;
 
 // Create axios instance with default config
 // Ensure baseURL does not end with a trailing slash to avoid duplication

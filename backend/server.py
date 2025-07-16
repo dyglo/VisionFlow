@@ -554,14 +554,7 @@ async def get_status_checks(db: AsyncSession = Depends(get_db)):
         logger.error(f"Error fetching status checks: {str(e)}")
         raise HTTPException(status_code=500, detail="Error fetching status checks")
 
-# Configure CORS before including routes
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins temporarily
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Configure CORS before including routes\n# Allow specific origins and all subdomains for Vercel deployments\napp.add_middleware(\n    CORSMiddleware,\n    allow_origins=[\n        "http://localhost:3000",\n        "https://vision-flow-alpha.vercel.app",\n    ],\n    # Allow any other *.vercel.app deployment previews\n    allow_origin_regex=r"https://.*\\.vercel\\.app",\n    allow_credentials=True,\n    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],\n    allow_headers=["*"],\n)
 
 # Include the router in the main app
 app.include_router(api_router)
