@@ -95,6 +95,39 @@ class CustomCORSMiddleware(BaseHTTPMiddleware):
 # Create the main app without a prefix
 app = FastAPI()
 
+# Add custom CORS middleware first for debugging and fallback
+app.add_middleware(CustomCORSMiddleware)
+
+# Configure standard CORS middleware as backup
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "https://vision-flow-alpha.vercel.app",
+    ],
+    # Allow any *.vercel.app deployment previews
+    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=3600,
+)
+
+# Add explicit OPTIONS handler for CORS preflight requests
+@app.options("/{path:path}")
+async def options_handler(path: str):
+    """Handle CORS preflight requests"""
+    return JSONResponse(
+        content={"message": "OK"},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Max-Age": "3600",
+        }
+    )
+
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
@@ -555,39 +588,7 @@ async def get_status_checks(db: AsyncSession = Depends(get_db)):
         logger.error(f"Error fetching status checks: {str(e)}")
         raise HTTPException(status_code=500, detail="Error fetching status checks")
 
-# Add custom CORS middleware first for debugging and fallback
-app.add_middleware(CustomCORSMiddleware)
 
-# Configure standard CORS middleware as backup
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "https://vision-flow-alpha.vercel.app",
-    ],
-    # Allow any *.vercel.app deployment previews
-    allow_origin_regex=r"https://.*\.vercel\.app",
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
-    expose_headers=["*"],
-    max_age=3600,
-)
-
-# Add explicit OPTIONS handler for CORS preflight requests
-@app.options("/{path:path}")
-async def options_handler(path: str):
-    """Handle CORS preflight requests"""
-    return JSONResponse(
-        content={"message": "CORS preflight OK"},
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-            "Access-Control-Allow-Headers": "*",
-            "Access-Control-Allow-Credentials": "true",
-            "Access-Control-Max-Age": "3600",
-        }
-    )
 
 # In-memory caches for analysis status and results (for demo/free tier only)
 analysis_status: Dict[str, str] = {}
