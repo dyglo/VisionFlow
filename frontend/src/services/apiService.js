@@ -8,7 +8,7 @@ let backendURL = process.env.REACT_APP_BACKEND_URL;
 if (!backendURL) {
   // If not set, choose sensible default based on host
   if (typeof window !== 'undefined' && window.location.hostname.endsWith('vercel.app')) {
-    backendURL = 'https://visionflow-2blz.onrender.com';
+    backendURL = 'https://visionflow-w6ur.onrender.com';
   } else {
     backendURL = 'http://127.0.0.1:8000';
   }
