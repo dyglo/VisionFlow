@@ -557,13 +557,9 @@ async def get_status_checks(db: AsyncSession = Depends(get_db)):
 # Configure CORS before including routes
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "https://vision-flow-alpha.vercel.app",
-        "https://*.vercel.app"
-    ],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_origins=["*"],  # Allow all origins temporarily
+    allow_credentials=False,
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
