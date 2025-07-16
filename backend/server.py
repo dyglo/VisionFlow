@@ -608,6 +608,7 @@ async def get_status_checks(db: AsyncSession = Depends(get_db)):
     """Get status checks - simplified implementation"""
     try:
         # Return empty list for now - implement User-based storage if needed
+        return []
     except Exception as e:
         logger.error(f"Error fetching status checks: {str(e)}")
         raise HTTPException(status_code=500, detail="Error fetching status checks")
